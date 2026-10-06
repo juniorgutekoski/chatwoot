@@ -3,7 +3,11 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import Icon from 'dashboard/components-next/icon/Icon.vue';
 import WootWriter from 'dashboard/components/widgets/WootWriter/Editor.vue';
+import AudioRecorder from 'dashboard/components/widgets/WootWriter/AudioRecorder.vue';
 import { useAlert } from 'dashboard/composables';
+import { useAccount } from 'dashboard/composables/useAccount';
+import { FEATURE_FLAGS } from 'dashboard/featureFlags';
+import { AUDIO_FORMATS } from 'shared/constants/messages';
 import {
   splitFilesBySize,
   usableFilesFromTransfer,
@@ -47,6 +51,7 @@ const emit = defineEmits([
 const alsoSendInChannel = ref(false);
 
 const { t } = useI18n();
+const { isCloudFeatureEnabled } = useAccount();
 
 const editorRef = ref(null);
 const fileInputRef = ref(null);
@@ -56,19 +61,73 @@ const isMentionMenuOpen = ref(false);
 const isConversationMenuOpen = ref(false);
 const isDragging = ref(false);
 
+const audioRecorderRef = ref(null);
+const isRecorderOpen = ref(false);
+// Empty until there is a recording to listen to, which covers both the capture running and
+// the stop still being encoded; then 'stopped' | 'playing' | 'paused', the last two reported
+// by the recorder itself.
+const recordingState = ref('');
+const recordingDuration = ref('00:00');
+// The File the recorder produced, held apart from attachedFiles so discarding a
+// recording can take out that one capture and leave clipped files alone.
+const recordedFile = ref(null);
+const sendWhenRecordingStops = ref(false);
+// Set by the first progress tick, which is the only word we get that the microphone really
+// opened. It outlives the capture on purpose: the encoder answers after the stop.
+const micWasArmed = ref(false);
+
 let draftTimer = null;
 let dragCounter = 0;
 
+// A voice note stays inside Chatwoot, so no channel decides the container: MP3 is
+// the one format every browser and both mobile apps play back, which is the same
+// reason the conversation composer picks it for a private note.
+const audioRecordFormat = AUDIO_FORMATS.MP3;
+
+const canRecordAudio =
+  typeof window !== 'undefined' &&
+  typeof window.MediaRecorder !== 'undefined' &&
+  Boolean(navigator.mediaDevices?.getUserMedia);
+
+// Not gated on `disabled`: that flips for the moment a message is being sent, and a
+// microphone that blinks out of the toolbar on every send is worse than one that is
+// there and briefly inert.
+const showRecorderButton = computed(
+  () => canRecordAudio && isCloudFeatureEnabled(FEATURE_FLAGS.VOICE_RECORDER)
+);
+
+const isCapturingAudio = computed(
+  () => isRecorderOpen.value && !recordingState.value
+);
+
+const recorderPlayStopIcon = computed(() => {
+  switch (recordingState.value) {
+    case 'playing':
+      return 'i-lucide-pause';
+    case 'paused':
+    case 'stopped':
+      return 'i-lucide-play';
+    default:
+      return 'i-lucide-square';
+  }
+});
+
 const canSend = computed(() => {
+  if (props.disabled) return false;
+  // While the microphone is capturing there is no file yet — the blob is only born
+  // on stop — but the send button has to stay alive, because stopping and sending
+  // is one gesture to the person holding it.
+  if (isCapturingAudio.value) return true;
   return (
-    (editorContent.value.trim().length > 0 || attachedFiles.value.length > 0) &&
-    !props.disabled
+    editorContent.value.trim().length > 0 || attachedFiles.value.length > 0
   );
 });
 
 function cancelEdit() {
   editorContent.value = '';
   attachedFiles.value = [];
+  recordedFile.value = null;
+  closeRecorder();
   emit('cancelEdit');
 }
 
@@ -97,12 +156,123 @@ function insertMentionTrigger(char) {
   editorRef.value?.insertMentionTrigger?.(char);
 }
 
+function removeRecordedFile() {
+  if (!recordedFile.value) return;
+  const index = attachedFiles.value.indexOf(recordedFile.value);
+  if (index !== -1) attachedFiles.value.splice(index, 1);
+  recordedFile.value = null;
+}
+
+function closeRecorder() {
+  isRecorderOpen.value = false;
+  recordingState.value = '';
+  recordingDuration.value = '00:00';
+  sendWhenRecordingStops.value = false;
+  micWasArmed.value = false;
+}
+
+function discardRecording() {
+  removeRecordedFile();
+  closeRecorder();
+}
+
+function toggleRecorder() {
+  if (isRecorderOpen.value) {
+    discardRecording();
+    return;
+  }
+  recordingState.value = '';
+  recordingDuration.value = '00:00';
+  micWasArmed.value = false;
+  isRecorderOpen.value = true;
+}
+
+// Whether the microphone is armed right now, asked of the recorder's own plugin rather
+// than inferred from the panel being open: a refused permission leaves the panel open
+// over a capture that never started, and a send must not wait for a blob that will
+// never come.
+function isMicrophoneCapturing() {
+  return Boolean(audioRecorderRef.value?.record?.isRecording?.());
+}
+
+// Whether there is a capture to wait for at all — which is not the same question. Between
+// the stop and the encoded file the microphone already reads as idle, so asking only the
+// plugin would drop a note that is seconds away from arriving. The first progress tick is
+// the proof the microphone opened; a refused permission never produces one.
+function hasCaptureToWaitFor() {
+  return isMicrophoneCapturing() || micWasArmed.value;
+}
+
+// One button, two jobs: it stops the capture while recording, and plays back what
+// was recorded afterwards — the same pairing the conversation composer uses.
+function toggleRecorderPlayPause() {
+  if (!audioRecorderRef.value) return;
+  if (isCapturingAudio.value) {
+    audioRecorderRef.value.stopRecording();
+    return;
+  }
+  audioRecorderRef.value.playPause();
+}
+
+function onRecordProgress(duration) {
+  micWasArmed.value = true;
+  recordingDuration.value = duration;
+}
+
+function onFinishRecord(recording) {
+  // Encoding a long note takes seconds, so the capture can land after the person
+  // already threw it away. Attaching it then would hide it twice over — the recorder
+  // is closed and the strip filters the recording out — and it would ride along with
+  // whatever they send next.
+  if (!isRecorderOpen.value) return;
+
+  recordingState.value = 'stopped';
+
+  const file = recording?.file;
+  if (!file) return;
+
+  recordedFile.value = file;
+  attachedFiles.value = [...attachedFiles.value, file];
+
+  if (sendWhenRecordingStops.value) {
+    sendWhenRecordingStops.value = false;
+    handleSend();
+  }
+}
+
+function onRecordError(payload) {
+  discardRecording();
+  // Being refused the microphone and losing the recording in the encoder are different
+  // accidents, and only one of them is worth checking a permission over.
+  useAlert(
+    payload?.stage === 'start'
+      ? t('INTERNAL_CHAT.MESSAGE.MICROPHONE_UNAVAILABLE')
+      : t('INTERNAL_CHAT.MESSAGE.AUDIO_CONVERSION_FAILED')
+  );
+}
+
 function handleSend() {
   if (!canSend.value) return;
+  // Sending over an open recorder stops the microphone and waits: the file arrives in
+  // onFinishRecord, which calls back here with the note already attached. This covers
+  // both the capture still running and the one already stopped but still encoding.
+  if (isCapturingAudio.value && hasCaptureToWaitFor()) {
+    sendWhenRecordingStops.value = true;
+    audioRecorderRef.value?.stopRecording();
+    return;
+  }
   const content = editorContent.value.trim();
   const files = [...attachedFiles.value];
+  // The send button stays alive while the recorder is open, so this is the floor that
+  // keeps a capture that never started from sending an empty message.
+  if (!content && !files.length) {
+    closeRecorder();
+    return;
+  }
   editorContent.value = '';
   attachedFiles.value = [];
+  recordedFile.value = null;
+  closeRecorder();
   if (draftTimer) {
     clearTimeout(draftTimer);
     draftTimer = null;
@@ -131,6 +301,11 @@ function handleKeyDown(event) {
     handleSend();
     return;
   }
+  if (event.key === 'Escape' && isRecorderOpen.value) {
+    event.preventDefault();
+    discardRecording();
+    return;
+  }
   if (event.key === 'Escape' && props.editingMessage) {
     cancelEdit();
   }
@@ -156,8 +331,16 @@ function handleFileChange(event) {
   if (fileInputRef.value) fileInputRef.value.value = '';
 }
 
-function removeFile(index) {
-  attachedFiles.value.splice(index, 1);
+// The recording has the recorder's own waveform and timer above the composer, so it
+// is left out of the attachment strip instead of being shown twice — the same split
+// the conversation composer makes between a clipped file and a voice note.
+const previewFiles = computed(() =>
+  attachedFiles.value.filter(file => file !== recordedFile.value)
+);
+
+function removeFile(file) {
+  const index = attachedFiles.value.indexOf(file);
+  if (index !== -1) attachedFiles.value.splice(index, 1);
 }
 
 // Paste and drop share the rule with the conversation composer: empty files are dropped, and
@@ -252,7 +435,12 @@ onBeforeUnmount(() => {
   }
 });
 
-defineExpose({ focus, setContent, getContent });
+defineExpose({
+  focus,
+  setContent,
+  getContent,
+  resetRecorder: discardRecording,
+});
 </script>
 
 <template>
@@ -298,10 +486,49 @@ defineExpose({ focus, setContent, getContent });
       />
       {{ t('INTERNAL_CHAT.THREAD.ALSO_SEND_IN_CHANNEL') }}
     </label>
+    <!-- Audio recorder: capture, play back, discard -->
+    <div
+      v-if="isRecorderOpen"
+      class="mb-1 flex items-center gap-2 rounded-lg border border-n-slate-6 bg-n-solid-1 px-2 py-1"
+    >
+      <button
+        type="button"
+        class="flex-shrink-0 flex items-center justify-center rounded-lg p-2 md:p-1.5 text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-slate-12 transition-colors"
+        :title="
+          isCapturingAudio
+            ? t('INTERNAL_CHAT.MESSAGE.STOP_RECORDING')
+            : t('INTERNAL_CHAT.MESSAGE.PLAY_RECORDING')
+        "
+        @click="toggleRecorderPlayPause"
+      >
+        <Icon :icon="recorderPlayStopIcon" class="size-4" />
+      </button>
+      <span class="flex-shrink-0 text-xs tabular-nums text-n-slate-11">
+        {{ recordingDuration }}
+      </span>
+      <AudioRecorder
+        ref="audioRecorderRef"
+        class="min-w-0 flex-1"
+        :audio-record-format="audioRecordFormat"
+        @recorder-progress-changed="onRecordProgress"
+        @finish-record="onFinishRecord"
+        @record-error="onRecordError"
+        @play="recordingState = 'playing'"
+        @pause="recordingState = 'paused'"
+      />
+      <button
+        type="button"
+        class="flex-shrink-0 flex items-center justify-center rounded-lg p-2 md:p-1.5 text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-ruby-11 transition-colors"
+        :title="t('INTERNAL_CHAT.MESSAGE.DISCARD_RECORDING')"
+        @click="discardRecording"
+      >
+        <Icon icon="i-lucide-trash-2" class="size-4" />
+      </button>
+    </div>
     <!-- Attached files preview -->
-    <div v-if="attachedFiles.length" class="mb-1 flex flex-col gap-1 px-1">
+    <div v-if="previewFiles.length" class="mb-1 flex flex-col gap-1 px-1">
       <div
-        v-for="(file, index) in attachedFiles"
+        v-for="(file, index) in previewFiles"
         :key="index"
         class="flex w-full items-center gap-1.5 rounded-md bg-n-slate-3 p-1.5 sm:w-60"
       >
@@ -326,7 +553,7 @@ defineExpose({ focus, setContent, getContent });
         <button
           type="button"
           class="flex-shrink-0 rounded p-1 text-n-slate-10 hover:bg-n-alpha-2 hover:text-n-ruby-11"
-          @click="removeFile(index)"
+          @click="removeFile(file)"
         >
           <Icon icon="i-lucide-x" class="size-4" />
         </button>
@@ -370,6 +597,27 @@ defineExpose({ focus, setContent, getContent });
         @click="openFilePicker"
       >
         <Icon icon="i-lucide-paperclip" class="size-4" />
+      </button>
+      <button
+        v-if="showRecorderButton"
+        type="button"
+        class="flex-shrink-0 flex items-center justify-center rounded-lg p-2 md:p-1.5 transition-colors"
+        :class="
+          isRecorderOpen
+            ? 'text-n-ruby-11 hover:bg-n-alpha-2'
+            : 'text-n-slate-11 hover:bg-n-alpha-2 hover:text-n-slate-12'
+        "
+        :title="
+          isRecorderOpen
+            ? t('INTERNAL_CHAT.MESSAGE.CANCEL_RECORDING')
+            : t('INTERNAL_CHAT.MESSAGE.RECORD_AUDIO')
+        "
+        @click="toggleRecorder"
+      >
+        <Icon
+          :icon="isRecorderOpen ? 'i-lucide-mic-off' : 'i-lucide-mic'"
+          class="size-4"
+        />
       </button>
       <!-- Mention shortcuts are hidden on the narrowest screens: they only type
       a character the on-screen keyboard already offers, and the room they take

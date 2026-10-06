@@ -474,6 +474,9 @@ watch(
   () => props.channelId,
   async (newId, oldId) => {
     if (oldId) saveDraftImmediately();
+    // A recording belongs to the channel it was spoken into. Left running, the
+    // microphone would keep capturing here and the note would land over there.
+    editorRef.value?.resetRecorder?.();
     activeThread.value = null;
     editingMessage.value = null;
     isViewingHistory.value = false;

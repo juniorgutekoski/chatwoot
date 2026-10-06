@@ -137,7 +137,7 @@ class InternalChatListener < BaseListener
       sender: message.sender.push_event_data, parent_id: message.parent_id, echo_id: message.echo_id,
       replies_count: message.replies_count, created_at: message.created_at, updated_at: message.updated_at,
       reactions: message.reactions.includes(:user).map { |r| { id: r.id, emoji: r.emoji, user_id: r.user_id, user: { name: r.user&.name } } },
-      attachments: message.attachments.map { |a| attachment_event_data(a) }
+      attachments: message.attachments.map(&:push_event_data)
     }
   end
 
@@ -168,16 +168,6 @@ class InternalChatListener < BaseListener
     }
     data[:voters] = option.votes.map { |v| v.user.push_event_data } if poll.public_results
     data
-  end
-
-  def attachment_event_data(attachment)
-    {
-      id: attachment.id,
-      file_type: attachment.file_type,
-      external_url: attachment.external_url,
-      extension: attachment.extension,
-      file_url: attachment.file.attached? ? Rails.application.routes.url_helpers.url_for(attachment.file) : nil
-    }
   end
 
   def reaction_event_data(reaction)

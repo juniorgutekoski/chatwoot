@@ -12,6 +12,7 @@ import Avatar from 'dashboard/components-next/avatar/Avatar.vue';
 import Icon from 'dashboard/components-next/icon/Icon.vue';
 import Dialog from 'dashboard/components-next/dialog/Dialog.vue';
 import Popover from 'dashboard/components-next/popover/Popover.vue';
+import AudioChip from 'dashboard/components-next/message/chips/Audio.vue';
 import ReactionDisplay from './ReactionDisplay.vue';
 import EmojiReactionPicker from './EmojiReactionPicker.vue';
 import { QUICK_EMOJIS, findOwnReaction } from './reactions';
@@ -355,6 +356,27 @@ function handleUnvote(payload) {
               loading="lazy"
             />
           </a>
+          <!-- The chip carries the player the conversation view already uses, so a voice
+          note plays in place instead of opening in a new tab. `inline_url` comes first
+          because `file_url` is served as an attachment, which Safari will not play; the
+          chip calls the URL `dataUrl`, as the conversation serializer does. The wrapper
+          keeps our sizing off the chip, which paints its own card. -->
+          <div
+            v-else-if="attachment.file_type === 'audio'"
+            class="w-full max-w-xs sm:w-72"
+          >
+            <AudioChip
+              :attachment="{
+                dataUrl:
+                  attachment.inline_url ||
+                  attachment.file_url ||
+                  attachment.external_url,
+                fileType: attachment.file_type,
+                extension: attachment.extension,
+              }"
+              class="text-n-slate-12"
+            />
+          </div>
           <a
             v-else
             :href="attachment.file_url || attachment.external_url"

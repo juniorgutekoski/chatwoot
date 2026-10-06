@@ -18,6 +18,51 @@ RSpec.describe InternalChat::MessageAttachment do
     end
   end
 
+  # The player cannot use a URL that is served as an attachment: Safari refuses to play audio
+  # whose response says so. `inline_url` is the half that asks, and `content_types_allowed_inline`
+  # (config/initializers/active_storage.rb) is the half that grants — asking alone is not enough,
+  # because `Blob#url` applies `forced_disposition_for_serving` over whatever the caller asked.
+  describe '#inline_url' do
+    let(:message) { create(:internal_chat_message) }
+
+    def attach(filename, content_type, file_type)
+      attachment = message.attachments.new(account: message.account, file_type: file_type)
+      attachment.file.attach(io: Rails.root.join("spec/assets/#{filename}").open, filename: filename,
+                             content_type: content_type)
+      attachment.save!
+      attachment
+    end
+
+    it 'asks for an inline disposition for audio' do
+      expect(attach('sample.mp3', 'audio/mpeg', :audio).inline_url).to match(/disposition=inline/)
+    end
+
+    it 'asks for an inline disposition for video' do
+      expect(attach('sample.mp4', 'video/mp4', :video).inline_url).to match(/disposition=inline/)
+    end
+
+    # Anything else is forced back to attachment anyway, so an inline URL would only promise
+    # what the blob will not deliver.
+    it 'has nothing to offer for other types' do
+      expect(attach('avatar.png', 'image/png', :image).inline_url).to be_nil
+    end
+
+    it 'is empty while no file is attached' do
+      expect(described_class.new(file_type: :audio).inline_url).to be_nil
+    end
+
+    # What the browser sends for a note recorded in the dashboard: lamejs labels the blob
+    # `audio/mp3`, which is not the registered name and is not in the allowlist. It plays today
+    # because Active Storage identifies the bytes and stores `audio/mpeg` — if that ever stops
+    # being true, every recorded note is served as a download instead.
+    it 'is not forced back to attachment for a note the recorder labelled audio/mp3' do
+      recorded = attach('sample.mp3', 'audio/mp3', :audio)
+
+      expect(recorded.file.blob.content_type).to eq('audio/mpeg')
+      expect(recorded.file.blob.send(:forced_disposition_for_serving)).to be_nil
+    end
+  end
+
   describe 'factory' do
     it 'creates a valid attachment' do
       attachment = create(:internal_chat_message_attachment)

@@ -1321,9 +1321,16 @@ export default {
       };
       return file && this.stageFile(autoRecordedFile);
     },
-    onRecordError() {
+    onRecordError(payload) {
       this.toggleAudioRecorder();
-      useAlert(this.$t('CONVERSATION.REPLYBOX.AUDIO_CONVERSION_FAILED'));
+      // Two different failures used to share one sentence. Being refused the microphone
+      // is not a conversion that failed, and telling someone to try again when the
+      // browser is blocking them sends them in circles.
+      useAlert(
+        payload?.stage === 'start'
+          ? this.$t('CONVERSATION.REPLYBOX.MICROPHONE_UNAVAILABLE')
+          : this.$t('CONVERSATION.REPLYBOX.AUDIO_CONVERSION_FAILED')
+      );
     },
     toggleTyping(status) {
       const conversationId = this.currentChat.id;

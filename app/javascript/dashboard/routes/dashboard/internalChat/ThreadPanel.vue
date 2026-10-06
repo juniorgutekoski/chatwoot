@@ -284,6 +284,9 @@ watch(
   () => props.parentMessage.id,
   (newId, oldId) => {
     if (oldId) saveThreadDraftImmediately(oldId);
+    // A recording belongs to the thread it was spoken into, the same way it belongs to
+    // its channel: left running, the note would land on the thread opened next.
+    threadEditorRef.value?.resetRecorder?.();
     fetchThread();
     loadThreadDraft();
   }

@@ -147,7 +147,7 @@ class Api::V1::Accounts::InternalChat::MessagesController < Api::V1::Accounts::I
       created_at: message.created_at,
       updated_at: message.updated_at,
       reactions: message.reactions.includes(:user).map { |r| { id: r.id, emoji: r.emoji, user_id: r.user_id, user: { name: r.user&.name } } },
-      attachments: deleted ? [] : message.attachments.map { |a| attachment_response(a) }
+      attachments: deleted ? [] : message.attachments.map(&:push_event_data)
     }
     response[:poll] = poll_data(message.poll) if !deleted && message.poll?
     response
@@ -173,16 +173,6 @@ class Api::V1::Accounts::InternalChat::MessagesController < Api::V1::Accounts::I
              voted: option.votes.any? { |v| v.user_id == Current.user.id } }
     data[:voters] = option.votes.map { |v| v.user.push_event_data } if poll.public_results
     data
-  end
-
-  def attachment_response(attachment)
-    {
-      id: attachment.id,
-      file_type: attachment.file_type,
-      external_url: attachment.external_url,
-      extension: attachment.extension,
-      file_url: attachment.file.attached? ? url_for(attachment.file) : nil
-    }
   end
 
   def dispatch_message_event(event, data)

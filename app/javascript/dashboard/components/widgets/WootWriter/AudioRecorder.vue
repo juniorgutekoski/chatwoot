@@ -28,6 +28,8 @@ const isRecording = ref(false);
 const isPlaying = ref(false);
 const hasRecording = ref(false);
 const recordedAudioUrl = ref(null);
+// Not a ref: nothing renders from it, and it is read after the component is gone.
+let isDestroyed = false;
 
 const formatTimeProgress = time => {
   const duration = intervalToDuration({ start: 0, end: time });
@@ -109,7 +111,9 @@ const initWaveSurfer = () => {
     } catch (error) {
       isRecording.value = false;
       hasRecording.value = false;
-      emit('recordError', { error });
+      // `stage` tells the two failures apart for whoever is listening: the recording was
+      // made and the encoder refused it, which is not the same as never getting to speak.
+      emit('recordError', { error, stage: 'conversion' });
     }
   });
 
@@ -125,9 +129,28 @@ const stopRecording = () => {
   }
 };
 
-const startRecording = () => {
-  record.value.startRecording();
-  isRecording.value = true;
+const startRecording = async () => {
+  // Arming the microphone can be refused — a denied permission, no input device — and
+  // the rejection has to reach the composer. Left unhandled, the recorder stayed open
+  // over a capture that never started: no waveform, no record-end, and nothing said.
+  try {
+    await record.value.startRecording();
+    // Closing the recorder while the microphone was still being granted destroyed the
+    // plugin before this resolved, so the stream opened with nobody left to stop it: a
+    // microphone recording with no UI, until the page is reloaded.
+    if (isDestroyed) {
+      // Optional calls on purpose: this runs against a plugin that was already destroyed,
+      // and a cleanup path is the worst place to throw.
+      record.value?.stopRecording?.();
+      record.value?.stopMic?.();
+      return;
+    }
+    isRecording.value = true;
+  } catch (error) {
+    isRecording.value = false;
+    if (isDestroyed) return;
+    emit('recordError', { error, stage: 'start' });
+  }
 };
 
 const playPause = () => {
@@ -143,6 +166,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  isDestroyed = true;
   if (recordedAudioUrl.value) {
     URL.revokeObjectURL(recordedAudioUrl.value);
     recordedAudioUrl.value = null;

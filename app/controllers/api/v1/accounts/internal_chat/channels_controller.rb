@@ -431,7 +431,7 @@ class Api::V1::Accounts::InternalChat::ChannelsController < Api::V1::Accounts::I
       created_at: message.created_at,
       updated_at: message.updated_at,
       reactions: reaction_responses(message),
-      attachments: deleted ? [] : message.attachments.map { |a| attachment_response(a) }
+      attachments: deleted ? [] : message.attachments.map(&:push_event_data)
     }
   end
 
@@ -466,16 +466,6 @@ class Api::V1::Accounts::InternalChat::ChannelsController < Api::V1::Accounts::I
     message.reactions.includes(:user).map do |r|
       { id: r.id, emoji: r.emoji, user_id: r.user_id, user: { name: r.user&.name } }
     end
-  end
-
-  def attachment_response(attachment)
-    {
-      id: attachment.id,
-      file_type: attachment.file_type,
-      external_url: attachment.external_url,
-      extension: attachment.extension,
-      file_url: attachment.file.attached? ? url_for(attachment.file) : nil
-    }
   end
 
   def channel_member_tokens(channel)

@@ -237,6 +237,33 @@ RSpec.describe 'Internal Chat Messages API', type: :request do
         expect(body['attachments'].size).to eq(1)
       end
 
+      # A recorded voice note is uploaded as an ordinary attachment, and the player needs a URL
+      # that is served inline: `file_url` carries no disposition, and Safari will not play audio
+      # whose response says attachment.
+      it 'files an uploaded audio under the audio type and hands back a URL served inline' do
+        file = fixture_file_upload(Rails.root.join('spec/assets/sample.mp3'), 'audio/mpeg')
+
+        post "/api/v1/accounts/#{account.id}/internal_chat/channels/#{channel.id}/messages",
+             params: { attachments: [{ file: file }] },
+             headers: agent.create_new_auth_token
+
+        expect(response).to have_http_status(:created)
+        attachment = response.parsed_body['attachments'].first
+        expect(attachment['file_type']).to eq('audio')
+        expect(attachment['inline_url']).to include('disposition=inline')
+      end
+
+      it 'leaves inline_url empty for an attachment that is not audio or video' do
+        file = fixture_file_upload(Rails.root.join('spec/assets/avatar.png'), 'image/png')
+
+        post "/api/v1/accounts/#{account.id}/internal_chat/channels/#{channel.id}/messages",
+             params: { attachments: [{ file: file }] },
+             headers: agent.create_new_auth_token
+
+        expect(response).to have_http_status(:created)
+        expect(response.parsed_body['attachments'].first['inline_url']).to be_nil
+      end
+
       it 'creates a thread reply with attachment, content and also_send_in_channel via multipart' do
         parent = create(:internal_chat_message, account: account, channel: channel, sender: agent, content: 'parent')
         file = fixture_file_upload(Rails.root.join('spec/assets/avatar.png'), 'image/png')
